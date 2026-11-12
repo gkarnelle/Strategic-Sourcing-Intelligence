@@ -1,40 +1,94 @@
-"""Generate reproducible synthetic procurement transactions. No real company data."""
+
+"""Build connected sourcing data from GaiAnQi Global Trade V2."""
+
 from pathlib import Path
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
-rng = np.random.default_rng(42)
-n = 10000
-supplier_ids = [f'SUP-{i:03d}' for i in range(1, 251)]
-categories = ['Electronics', 'Packaging', 'Logistics', 'Raw Materials', 'MRO', 'Professional Services']
-regions = ['North America', 'Europe', 'Asia Pacific', 'Latin America']
-suppliers = pd.DataFrame({
-    'supplier_id': supplier_ids,
-    'supplier_name': [f'Synthetic Supplier {i:03d}' for i in range(1, 251)],
-    'region': rng.choice(regions, 250, p=[.35, .25, .30, .10]),
-    'category': rng.choice(categories, 250),
-    'contracted': rng.choice([True, False], 250, p=[.75, .25]),
-})
-# Fictional supplier identity for portfolio demonstration
-suppliers.loc[suppliers['supplier_id'] == 'SUP-016', 'supplier_name'] = 'KG Soundworks'
-suppliers.to_csv(ROOT / 'suppliers.csv', index=False)
-weights = rng.pareto(1.6, 250) + .2
-weights /= weights.sum()
-selected = rng.choice(supplier_ids, n, p=weights)
-dates = pd.Timestamp('2025-01-01') + pd.to_timedelta(rng.integers(0, 365, n), unit='D')
-amounts = np.round(rng.lognormal(7.2, 1.0, n), 2)
-invoices = [f'INV-{i:06d}' for i in range(1, n+1)]
-# Inject a small number of intentional duplicate invoice identifiers for testing.
-for i in range(150, 180):
-    selected[i] = selected[i-100]
-    invoices[i] = invoices[i-100]
-transactions = pd.DataFrame({
-    'transaction_id': [f'TXN-{i:06d}' for i in range(1, n+1)],
-    'invoice_id': invoices,
-    'supplier_id': selected,
-    'invoice_date': dates,
-    'amount_usd': amounts,
-})
-transactions.to_csv(ROOT / 'transactions.csv', index=False)
-print(f'Generated {len(suppliers):,} suppliers and {len(transactions):,} transactions')
+SOURCE = (
+    "https://raw.githubusercontent.com/"
+    "gkarnelle/Global-Trade-Data-Analysis/main/v2/data/"
+)
+
+def load(filename):
+    return pd.read_csv(SOURCE + filename)
+
+suppliers = load("suppliers.csv")
+orders = load("purchase_orders.csv")
+lines = load("purchase_order_lines.csv")
+
+# Validate canonical identifiers.
+for name, frame, key in [
+    ("suppliers", suppliers, "supplier_id"),
+    ("purchase orders", orders, "purchase_order_id"),
+    ("purchase order lines", lines, "purchase_order_line_id"),
+]:
+    if frame[key].isna().any() or frame[key].duplicated().any():
+        raise ValueError(f"Invalid identifiers in {name}")
+
+if not orders["supplier_id"].isin(suppliers["supplier_id"]).all():
+    raise ValueError("Purchase orders reference unknown suppliers")
+
+if not lines["purchase_order_id"].isin(
+    orders["purchase_order_id"]
+).all():
+    raise ValueError("Purchase order lines reference unknown orders")
+
+# Validate financial consistency.
+line_totals = lines.groupby("purchase_order_id")[
+    "line_value_usd"
+].sum()
+
+comparison = orders.set_index("purchase_order_id")[
+    "total_order_value_usd"
+].sub(line_totals, fill_value=0)
+
+if (comparison.abs() > 0.01).any():
+    raise ValueError("Purchase order and line totals do not reconcile")
+
+# Create a sourcing transaction for each purchase order line.
+transactions = lines.merge(
+    orders[
+        [
+            "purchase_order_id",
+            "supplier_id",
+            "order_date",
+            "purchase_order_status",
+        ]
+    ],
+    on="purchase_order_id",
+    validate="many_to_one",
+)
+
+transactions = transactions.rename(
+    columns={
+        "purchase_order_line_id": "transaction_id",
+        "order_date": "transaction_date",
+        "line_value_usd": "amount_usd",
+    }
+)
+
+transactions = transactions[
+    [
+        "transaction_id",
+        "purchase_order_id",
+        "product_id",
+        "supplier_id",
+        "transaction_date",
+        "purchase_order_status",
+        "quantity_ordered",
+        "unit_cost_usd",
+        "amount_usd",
+    ]
+]
+
+# Save only after successful validation.
+suppliers.to_csv(ROOT / "suppliers.csv", index=False)
+orders.to_csv(ROOT / "purchase_orders.csv", index=False)
+transactions.to_csv(ROOT / "transactions.csv", index=False)
+
+print("GaiAnQi sourcing integration complete")
+print(f"Suppliers: {len(suppliers):,}")
+print(f"Purchase orders: {len(orders):,}")
+print(f"Procurement line transactions: {len(transactions):,}")
+print(f"Purchase order value: ${orders['total_order_value_usd'].sum():,.2f}")
