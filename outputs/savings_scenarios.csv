@@ -1,0 +1,4 @@
+scenario,addressable_pct,savings_rate_pct,estimated_savings_usd,savings_pct_total_spend
+Conservative,10.0,2.0,996369.09,0.2
+Moderate,25.0,3.0,3736384.09,0.75
+Ambitious,40.0,5.0,9963690.91,2.0
